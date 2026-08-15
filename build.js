@@ -72,6 +72,14 @@ function readVendor(name) {
   return fs.readFileSync(path.join(ROOT, "vendor", name), "utf8");
 }
 
+// Unlike three.module.min.js/cannon-es.min.js, Cytoscape.js's own dist build
+// (dist/cytoscape.min.js from the `cytoscape` npm package) is a UMD bundle
+// that already self-registers `window.cytoscape` when loaded as a plain
+// classic <script> (its UMD header falls through to the
+// `(this||self).cytoscape = factory()` branch when neither `module.exports`
+// nor AMD `define` is in scope). So it needs no export-rewrite IIFE
+// treatment at all -- it's inlined verbatim, unlike wrapVendorModuleAsIIFE().
+
 function build() {
   if (!fs.existsSync(SRC_HTML)) {
     throw new Error(`${SRC_HTML} not found — this build reads the .src.html template, not fabled_lands_character_sheet.html directly.`);
@@ -82,10 +90,13 @@ function build() {
   const cannonIIFE = wrapVendorModuleAsIIFE(readVendor("cannon-es.min.js"), "CANNON");
   const diceModule = wrapDiceModule(fs.readFileSync(path.join(ROOT, "src", "dice-physics.js"), "utf8"));
 
+  const cytoscapeVerbatim = readVendor("cytoscape.min.js");
+
   const injections = {
     "<!-- BUILD:VENDOR three.module.min.js -->": threeIIFE,
     "<!-- BUILD:VENDOR cannon-es.min.js -->": cannonIIFE,
     "<!-- BUILD:MODULE src/dice-physics.js -->": diceModule,
+    "<!-- BUILD:VENDOR-VERBATIM cytoscape.min.js -->": cytoscapeVerbatim,
   };
 
   let missing = [];
