@@ -143,6 +143,9 @@
     padding: 14px 16px;
   }
   .panel.wide{ grid-column: 1 / -1; }
+  .ref-toggle{ cursor: pointer; user-select: none; }
+  .panel.folded{ padding-bottom: 14px; }
+  .panel.folded > *:not(h2){ display: none !important; }
   .journey-panel{ border-width: 2px; border-color: var(--gold); }
   .journey-actions{ display:flex; gap:8px; flex-wrap:wrap; }
   .path-track{ display:flex; align-items:center; overflow-x:auto; padding:10px 2px; -webkit-overflow-scrolling:touch; }
@@ -184,8 +187,9 @@
   .chip-remove{ background:none; border:none; color: var(--ink-faint); font-weight:bold; font-size: 1rem; line-height:1; padding: 2px 6px; border-radius: 50%; }
   .chip-remove:hover{ background: rgba(139,38,53,0.18); color: var(--blood-bright); }
   .possession-chip{ padding-right: 4px; }
+  .chip-stat-select{ width: 62px; padding: 2px 16px 2px 6px; font-size: 0.78rem; border-radius: 12px; background-position: right 4px center; }
   .chip-def-input{
-    width: 46px; padding: 2px 2px; text-align:center; font-size: 0.82rem; border-radius: 12px;
+    width: 40px; padding: 2px 2px; text-align:center; font-size: 0.82rem; border-radius: 12px;
     -moz-appearance: textfield;
   }
   .chip-def-input::-webkit-outer-spin-button, .chip-def-input::-webkit-inner-spin-button{ -webkit-appearance:none; margin:0; }
@@ -208,6 +212,9 @@
   table.entry-table td{ padding: 4px 6px; vertical-align: top; }
   table.entry-table input, table.entry-table select{ width: 100%; }
   table.entry-table .col-del{ width: 34px; text-align:center; }
+  table.entry-table .col-check{ width: 32px; text-align:center; }
+  tr.tick-checked, .entry-card.tick-checked{ opacity: 0.55; }
+  .tick-check-label{ display:flex; align-items:center; gap:6px; margin-bottom:8px; font-weight:bold; font-size:0.82rem; color: var(--ink-faint); }
   .entry-cards{ display:none; }
   @media (max-width: 640px){
     table.entry-table{ display:none; }
@@ -413,6 +420,22 @@ const PROFESSIONS = [
 function professionByName(name){ return PROFESSIONS.find(p => p.name === name) || null; }
 function abilitiesAllZero(abilities){ return Object.values(abilities).every(v => !v); }
 
+// What an equipped possession can grant a bonus to -- generalizes the old
+// Defence-only bonus so a ring, amulet, blessed weapon etc. can boost any
+// ability (or Stamina), the same way the D&D sheet's feats aren't limited
+// to a single stat.
+const BONUS_STATS = [
+  { key: "defence", label: "Def" },
+  { key: "charisma", label: "Cha" },
+  { key: "combat", label: "Com" },
+  { key: "magic", label: "Mag" },
+  { key: "sanctity", label: "San" },
+  { key: "scouting", label: "Sco" },
+  { key: "thievery", label: "Thi" },
+  { key: "stamina", label: "Sta" }
+];
+function bonusStatLabel(key){ const b = BONUS_STATS.find(b => b.key === key); return b ? b.label : ""; }
+
 function defaultChar(id){
   return {
     id,
@@ -432,6 +455,7 @@ function defaultChar(id){
     resurrection: "",
     codewords: [],
     journey: [],
+    ticks: [],
     ships: [],
     notes: ""
   };
@@ -445,12 +469,16 @@ function hydrate(s){
   out.abilities = Object.assign({}, d.abilities, s.abilities || {});
   out.professionCustom = typeof s.professionCustom === "boolean" ? s.professionCustom : false;
   out.rank = Math.round(typeof s.rank === "number" ? s.rank : (parseFloat(s.rank) || 0));
-  // Possessions used to be a plain string[]; each one is now an object so
-  // it can optionally carry a Defence bonus + equipped flag (e.g. armour).
+  // Possessions used to be a plain string[], then gained a Defence-only
+  // bonus ({name,defenceBonus,equipped}); now the bonus can target any
+  // stat ({name,bonusStat,bonusAmount,equipped}). Migrate through both.
   out.possessions = Array.isArray(s.possessions)
-    ? s.possessions.map(p => typeof p === "string"
-        ? { name: p, defenceBonus: 0, equipped: false }
-        : { name: p.name || "", defenceBonus: p.defenceBonus || 0, equipped: !!p.equipped })
+    ? s.possessions.map(p => {
+        if(typeof p === "string") return { name: p, bonusStat: "", bonusAmount: 0, equipped: false };
+        if(typeof p.bonusStat === "string") return { name: p.name || "", bonusStat: p.bonusStat, bonusAmount: p.bonusAmount || 0, equipped: !!p.equipped };
+        const bonusAmount = p.defenceBonus || 0;
+        return { name: p.name || "", bonusStat: bonusAmount ? "defence" : "", bonusAmount, equipped: !!p.equipped };
+      })
     : [];
   out.titles = Array.isArray(s.titles) ? s.titles : [];
   out.blessings = Array.isArray(s.blessings) ? s.blessings : [];
@@ -458,6 +486,9 @@ function hydrate(s){
   // "journey" replaces the older "tickoffs" name -- same shape ({book,
   // paragraph, note}[]), just renamed before this ever shipped to anyone.
   out.journey = Array.isArray(s.journey) ? s.journey : (Array.isArray(s.tickoffs) ? s.tickoffs : []);
+  // "ticks" is the separate closed-list checklist (book+paragraph+checked),
+  // distinct from the freeform Journey log.
+  out.ticks = Array.isArray(s.ticks) ? s.ticks : [];
   out.ships = Array.isArray(s.ships) ? s.ships : [];
   return out;
 }
@@ -473,11 +504,12 @@ function demoChar(id){
   c.staminaMax = 18;
   c.staminaCurrent = 14;
   c.possessions = [
-    { name: "Sword", defenceBonus: 0, equipped: false },
-    { name: "Leather jerkin", defenceBonus: 1, equipped: true },
-    { name: "Lantern", defenceBonus: 0, equipped: false },
-    { name: "Rope (12 yards)", defenceBonus: 0, equipped: false },
-    { name: "Rations (3 days)", defenceBonus: 0, equipped: false }
+    { name: "Sword", bonusStat: "", bonusAmount: 0, equipped: false },
+    { name: "Leather jerkin", bonusStat: "defence", bonusAmount: 1, equipped: true },
+    { name: "Lantern", bonusStat: "", bonusAmount: 0, equipped: false },
+    { name: "Rope (12 yards)", bonusStat: "", bonusAmount: 0, equipped: false },
+    { name: "Rations (3 days)", bonusStat: "", bonusAmount: 0, equipped: false },
+    { name: "Amulet of the Sun", bonusStat: "sanctity", bonusAmount: 1, equipped: true }
   ];
   c.titles = ["Freeman of Bristle"];
   c.blessings = ["Once per adventure, reroll a single die"];
@@ -486,6 +518,10 @@ function demoChar(id){
   c.journey = [
     { book: FL_BOOKS[0], paragraph: "1", note: "Set out from Godor harbour" },
     { book: FL_BOOKS[0], paragraph: "160", note: "Met the harbour master" }
+  ];
+  c.ticks = [
+    { book: FL_BOOKS[0], paragraph: "91", checked: true },
+    { book: FL_BOOKS[0], paragraph: "233", checked: false }
   ];
   c.ships = [];
   c.notes = "";
@@ -507,6 +543,18 @@ let pendingConfirm = null; // { message, fn }
 let saveTimer = null;
 let lastDiceRoll = null;
 let diceHistory = [];
+
+/* ---------- panel fold/hide (per-panel, persisted UI preference) ---------- */
+let foldedPanels = storageGet("folded-panels", {});
+const ALL_PANEL_IDS = ["journey","ticks","identity","abilities","combat","money","dice","possessions","titles","blessings","resurrection","codewords","ships","notes"];
+function togglePanelFold(id){ foldedPanels[id] = !foldedPanels[id]; render(); saveFoldedPanels(); }
+function setAllFolded(hide){
+  ALL_PANEL_IDS.forEach(id => foldedPanels[id] = hide);
+  render();
+  saveFoldedPanels();
+}
+function foldIcon(id){ return `<span class="no-print" style="margin-left:auto;font-size:11px;color:var(--ink-faint)">${foldedPanels[id] ? "▾ show" : "▴ hide"}</span>`; }
+function saveFoldedPanels(){ storageSet("folded-panels", foldedPanels); }
 
 const DIE_LAYOUTS = {
   1: [0,0,0, 0,1,0, 0,0,0],
@@ -674,7 +722,7 @@ function addPossession(inputEl){
   const val = (inputEl.value || "").trim();
   if(!val) return;
   if(state.possessions.length >= 12) return;
-  state.possessions.push({ name: val, defenceBonus: 0, equipped: false });
+  state.possessions.push({ name: val, bonusStat: "", bonusAmount: 0, equipped: false });
   inputEl.value = "";
   render();
   queueSave();
@@ -689,11 +737,19 @@ function togglePossessionEquipped(index){
   render();
   queueSave();
 }
-function setPossessionDefenceBonus(index, value){
+function setPossessionBonusStat(index, statKey){
+  const p = state.possessions[index];
+  p.bonusStat = statKey;
+  if(!statKey){ p.bonusAmount = 0; p.equipped = false; }
+  render();
+  queueSave();
+}
+function setPossessionBonusAmount(index, value){
   let n = parseInt(value, 10);
   if(isNaN(n)) n = 0;
-  state.possessions[index].defenceBonus = n;
-  if(!n) state.possessions[index].equipped = false;
+  const p = state.possessions[index];
+  p.bonusAmount = n;
+  if(!n) p.equipped = false;
   render();
   queueSave();
 }
@@ -711,6 +767,8 @@ function removeRow(field, index){
 }
 function blankJourneyEntry(book){ return { book: book || FL_BOOKS[0], paragraph: "", note: "" }; }
 function blankShip(){ return { shipType: "", name: "", crewQuality: "", cargoCapacity: "", currentCargo: "", whereDocked: "" }; }
+function blankTick(){ return { book: FL_BOOKS[0], paragraph: "", checked: false }; }
+function toggleTick(i){ state.ticks[i].checked = !state.ticks[i].checked; render(); queueSave(); }
 
 /* ---------- journey (paragraph history) ---------- */
 // "Current page" is simply the most recently logged journey entry -- the
@@ -736,10 +794,11 @@ function toggleJourneyExpanded(){ journeyExpanded = !journeyExpanded; render(); 
 
 /* ---------- stamina / money quick adjust ---------- */
 function adjustStamina(delta){
-  const v = clamp((state.staminaCurrent||0) + delta, 0, Math.max(state.staminaMax||0, state.staminaCurrent||0));
+  const max = effectiveStaminaMax(state);
+  const v = clamp((state.staminaCurrent||0) + delta, 0, Math.max(max, state.staminaCurrent||0));
   set("staminaCurrent", v);
 }
-function resetStamina(){ set("staminaCurrent", state.staminaMax||0); }
+function resetStamina(){ set("staminaCurrent", effectiveStaminaMax(state)); }
 function adjustMoney(delta){ set("money", Math.max(0, (state.money||0) + delta)); }
 
 /* ---------- 3D physics dice ---------- */
@@ -749,6 +808,16 @@ function adjustMoney(delta){ set("money", Math.max(0, (state.money||0) + delta))
 // animation. Fabled Lands only ever uses ordinary d6s, so every spec here is
 // {sides:6}. The engine is created lazily on the first roll so page load
 // never pays for it.
+// Low-performance mode skips the physics engine entirely (never calls
+// ensureDiceEngine, which is what's slow to spin up on weak hardware) and
+// just rolls instantly -- the result still shows in the Dice panel/ability
+// boxes via lastDiceRoll/abilityRollFlash, just without the 3D overlay.
+let diceMode = storageGet("dice-mode", "3d"); // '3d' | 'simple'
+function setDiceMode(mode){ diceMode = mode; storageSet("dice-mode", mode); render(); }
+function showRollBanner(items){
+  if(diceMode === "simple") return;
+  ensureDiceEngine().showResultBanner(items);
+}
 let diceEngine = null;
 function ensureDiceEngine(){
   if(diceEngine) return diceEngine;
@@ -772,6 +841,11 @@ function hideDiceOverlay(){
 }
 function dismissDiceOverlay(){ hideDiceOverlay(); }
 async function rollPhysicalDice(count, hint){
+  if(diceMode === "simple"){
+    const results = [];
+    for(let i=0;i<count;i++) results.push(1 + Math.floor(Math.random()*6));
+    return results;
+  }
   const engine = ensureDiceEngine();
   showDiceOverlay(hint);
   const results = await engine.roll([{ sides: 6, count, tag: "d6" }]);
@@ -789,18 +863,18 @@ async function rollDice(n){
   lastDiceRoll = { n, results, total };
   diceHistory.unshift(lastDiceRoll);
   diceHistory = diceHistory.slice(0, 8);
-  ensureDiceEngine().showResultBanner([{ key:"roll", title: hint, value: n>1 ? `${results.join(" + ")} = ${total}` : `${total}`, y:0.42 }]);
+  showRollBanner([{ key:"roll", title: hint, value: n>1 ? `${results.join(" + ")} = ${total}` : `${total}`, y:0.42 }]);
   render();
 }
 async function rollAbilityCheck(key, label){
-  const bonus = state.abilities[key] || 0;
+  const bonus = effectiveAbility(state, key);
   const results = await rollPhysicalDice(2, label);
   const diceTotal = results.reduce((a,b)=>a+b,0);
   const total = diceTotal + bonus;
   lastDiceRoll = { n:2, results, diceTotal, bonus, total, label };
   diceHistory.unshift(lastDiceRoll);
   diceHistory = diceHistory.slice(0, 8);
-  ensureDiceEngine().showResultBanner([{ key:"roll", title: label, value: `${results.join(" + ")} + ${bonus} = ${total}`, y:0.42 }]);
+  showRollBanner([{ key:"roll", title: label, value: `${results.join(" + ")} + ${bonus} = ${total}`, y:0.42 }]);
   abilityRollFlash[key] = total;
   clearTimeout(abilityRollFlashTimers[key]);
   abilityRollFlashTimers[key] = setTimeout(() => { delete abilityRollFlash[key]; render(); }, 5000);
@@ -820,7 +894,7 @@ async function levelUp(){
   lastDiceRoll = { n:1, results, total: gain, label: "Level Up (+Stamina)" };
   diceHistory.unshift(lastDiceRoll);
   diceHistory = diceHistory.slice(0, 8);
-  ensureDiceEngine().showResultBanner([{ key:"roll", title:"Rank Up!", value:`+${gain} Stamina — now Rank ${state.rank}`, y:0.42 }]);
+  showRollBanner([{ key:"roll", title:"Rank Up!", value:`+${gain} Stamina — now Rank ${state.rank}`, y:0.42 }]);
   render();
   queueSave();
 }
@@ -1053,8 +1127,8 @@ function chipListPanel(title, icon, field, opts){
     ? displayItems.map(({v,i}) => `<span class="chip">${esc(v)}<button type="button" class="chip-remove" onclick="removeChip('${field}',${i})" aria-label="Remove ${esc(v)}">&times;</button></span>`).join("")
     : `<p class="empty-hint">${esc(opts.emptyText || "Nothing yet.")}</p>`;
   return `
-  <section class="panel">
-    <h2>${icon} ${title} ${cap ? `<span class="count-badge ${atCap?"count-full":""}">${items.length}/${cap}</span>` : ""}</h2>
+  <section class="panel ${foldedPanels[field] ? "folded" : ""}">
+    <h2 class="ref-toggle" onclick="togglePanelFold('${field}')">${icon} ${title} ${cap ? `<span class="count-badge ${atCap?"count-full":""}">${items.length}/${cap}</span>` : ""} ${foldIcon(field)}</h2>
     <div class="chip-list">${chips}</div>
     <form class="chip-add-form no-print" onsubmit="event.preventDefault(); addChip('${field}', this.elements.val, ${cap ? cap : "null"});">
       <input type="text" name="val" placeholder="${esc(opts.placeholder || "Add...")}" autocomplete="off" ${atCap?"disabled":""}>
@@ -1073,15 +1147,19 @@ function possessionsPanelHTML(){
     ? items.map((p, i) => `
       <span class="chip possession-chip">
         <span class="chip-name">${esc(p.name)}</span>
-        <input type="number" class="chip-def-input no-print" value="${p.defenceBonus || ""}" placeholder="Def" title="Defence bonus this item gives when equipped" onchange="setPossessionDefenceBonus(${i}, this.value)">
-        <button type="button" class="chip-equip-toggle no-print ${p.equipped?"active":""}" title="${p.equipped?"Equipped — counts toward Defence":"Not equipped"}" onclick="togglePossessionEquipped(${i})" ${!p.defenceBonus?"disabled":""}>🛡</button>
+        <select class="chip-stat-select no-print" title="Which ability/stat this item boosts when equipped" onchange="setPossessionBonusStat(${i}, this.value)">
+          <option value="">Bonus…</option>
+          ${BONUS_STATS.map(b => `<option value="${b.key}" ${p.bonusStat===b.key?"selected":""}>${b.label}</option>`).join("")}
+        </select>
+        ${p.bonusStat ? `<input type="number" class="chip-def-input no-print" value="${p.bonusAmount || ""}" placeholder="+" title="Bonus amount" onchange="setPossessionBonusAmount(${i}, this.value)">` : ""}
+        <button type="button" class="chip-equip-toggle no-print ${p.equipped?"active":""}" title="${p.equipped?"Equipped — bonus applies":"Not equipped"}" onclick="togglePossessionEquipped(${i})" ${!p.bonusAmount?"disabled":""}>🛡</button>
         <button type="button" class="chip-remove no-print" onclick="removePossession(${i})" aria-label="Remove ${esc(p.name)}">&times;</button>
       </span>`).join("")
     : `<p class="empty-hint">Nothing yet.</p>`;
   return `
-  <section class="panel">
-    <h2>🎒 Possessions <span class="count-badge ${atCap?"count-full":""}">${items.length}/${cap}</span></h2>
-    <p class="modal-hint">Give an item a Defence bonus (armour, a shield...) and mark it 🛡 Equipped to count it toward Defence above.</p>
+  <section class="panel ${foldedPanels['possessions'] ? "folded" : ""}">
+    <h2 class="ref-toggle" onclick="togglePanelFold('possessions')">🎒 Possessions <span class="count-badge ${atCap?"count-full":""}">${items.length}/${cap}</span> ${foldIcon('possessions')}</h2>
+    <p class="modal-hint">Give an item a bonus (Defence from armour, Sanctity from a blessed amulet...) and mark it 🛡 Equipped to apply it above.</p>
     <div class="chip-list">${chips}</div>
     <form class="chip-add-form no-print" onsubmit="event.preventDefault(); addPossession(this.elements.val);">
       <input type="text" name="val" placeholder="Add a possession..." autocomplete="off" ${atCap?"disabled":""}>
@@ -1096,8 +1174,8 @@ function identityPanelHTML(){
   const matched = !s.professionCustom ? professionByName(s.profession) : null;
   const selectValue = s.professionCustom ? "__custom__" : (matched ? matched.key : "");
   return `
-  <section class="panel wide">
-    <h2>🗺️ Identity</h2>
+  <section class="panel wide ${foldedPanels['identity'] ? "folded" : ""}">
+    <h2 class="ref-toggle" onclick="togglePanelFold('identity')">🗺️ Identity ${foldIcon('identity')}</h2>
     <div class="field-grid">
       <div class="field"><label for="fName">Name</label><input id="fName" type="text" value="${esc(s.name)}" onchange="set('name', this.value)"></div>
       <div class="field">
@@ -1126,45 +1204,58 @@ function abilitiesPanelHTML(){
   const s = state;
   const abilList = [["charisma","Charisma"],["combat","Combat"],["magic","Magic"],["sanctity","Sanctity"],["scouting","Scouting"],["thievery","Thievery"]];
   return `
-  <section class="panel">
-    <h2>✨ Abilities</h2>
+  <section class="panel ${foldedPanels['abilities'] ? "folded" : ""}">
+    <h2 class="ref-toggle" onclick="togglePanelFold('abilities')">✨ Abilities ${foldIcon('abilities')}</h2>
     <div class="abilities-grid">
-      ${abilList.map(([key,label]) => `
+      ${abilList.map(([key,label]) => { const eff = effectiveAbility(s, key); const bonus = eff - (s.abilities[key]||0); return `
         <div class="ability-box">
           <label for="ab-${key}">${label}</label>
           <input id="ab-${key}" type="number" value="${s.abilities[key]}" onchange="setNum('abilities.${key}', this.value)">
+          ${bonus ? `<p class="formula-note">Effective: ${eff} (+${bonus} equipped)</p>` : ""}
           <button type="button" class="secondary ability-roll-btn no-print" onclick="rollAbilityCheck('${key}', '${label}')">🎲 Roll</button>
           ${key in abilityRollFlash ? `<div class="ability-roll-flash">${abilityRollFlash[key]}</div>` : ""}
         </div>
-      `).join("")}
+      `; }).join("")}
     </div>
     <p class="modal-hint">Rolling throws 2 dice for that ability — compare the total to whatever your book asks for in that moment, since the exact target differs by situation.</p>
   </section>`;
 }
 
-function equippedDefenceBonus(s){
-  return s.possessions.filter(p => p.equipped).reduce((sum, p) => sum + (p.defenceBonus||0), 0);
+function equippedBonus(s, statKey){
+  return s.possessions.filter(p => p.equipped && p.bonusStat === statKey).reduce((sum, p) => sum + (p.bonusAmount||0), 0);
+}
+function effectiveAbility(s, key){
+  return (s.abilities[key]||0) + equippedBonus(s, key);
+}
+function effectiveStaminaMax(s){
+  return (s.staminaMax||0) + equippedBonus(s, "stamina");
 }
 function computeDefence(s){
-  return (s.abilities.combat||0) + (s.rank||0) + equippedDefenceBonus(s);
+  return effectiveAbility(s, "combat") + (s.rank||0) + equippedBonus(s, "defence");
 }
 function combatPanelHTML(){
   const s = state;
   const defence = computeDefence(s);
-  const max = Math.max(0, s.staminaMax||0);
+  const effCombat = effectiveAbility(s, "combat");
+  const max = Math.max(0, effectiveStaminaMax(s));
+  const staminaBonus = equippedBonus(s, "stamina");
   const cur = clamp(s.staminaCurrent||0, 0, Math.max(max, s.staminaCurrent||0));
   const pct = max > 0 ? clamp((cur/max)*100, 0, 100) : 0;
   const low = max > 0 && cur/max <= 0.33;
   return `
-  <section class="panel">
-    <h2>🛡️ Combat &amp; Stamina</h2>
+  <section class="panel ${foldedPanels['combat'] ? "folded" : ""}">
+    <h2 class="ref-toggle" onclick="togglePanelFold('combat')">🛡️ Combat &amp; Stamina ${foldIcon('combat')}</h2>
     <div class="field-grid">
       <div class="field">
         <label>Defence</label>
         <div class="computed-value">${defence}</div>
-        <p class="formula-note">${s.abilities.combat||0} Combat + ${s.rank||0} Rank + ${equippedDefenceBonus(s)} equipped</p>
+        <p class="formula-note">${effCombat} Combat + ${s.rank||0} Rank + ${equippedBonus(s,"defence")} equipped</p>
       </div>
-      <div class="field"><label for="fStamMax">Unwounded Stamina</label><input id="fStamMax" type="number" min="0" value="${s.staminaMax}" onchange="setNum('staminaMax', this.value, 0)"></div>
+      <div class="field">
+        <label for="fStamMax">Unwounded Stamina</label>
+        <input id="fStamMax" type="number" min="0" value="${s.staminaMax}" onchange="setNum('staminaMax', this.value, 0)">
+        ${staminaBonus ? `<p class="formula-note">Effective: ${max} (+${staminaBonus} equipped)</p>` : ""}
+      </div>
       <div class="field"><label for="fStamCur">Current Stamina</label><input id="fStamCur" type="number" min="0" value="${s.staminaCurrent}" onchange="setNum('staminaCurrent', this.value, 0)"></div>
     </div>
     <div class="stamina-bar-outer"><div class="stamina-bar-inner${low?" low":""}" style="width:${pct}%"></div></div>
@@ -1181,8 +1272,8 @@ function combatPanelHTML(){
 function moneyPanelHTML(){
   const s = state;
   return `
-  <section class="panel">
-    <h2>💰 Money</h2>
+  <section class="panel ${foldedPanels['money'] ? "folded" : ""}">
+    <h2 class="ref-toggle" onclick="togglePanelFold('money')">💰 Money ${foldIcon('money')}</h2>
     <div class="field">
       <input type="number" min="0" value="${s.money}" onchange="setNum('money', this.value, 0)" style="font-size:1.4rem;font-weight:bold;width:140px">
     </div>
@@ -1198,8 +1289,8 @@ function moneyPanelHTML(){
 function resurrectionPanelHTML(){
   const s = state;
   return `
-  <section class="panel">
-    <h2>🕊️ Resurrection Arrangements</h2>
+  <section class="panel ${foldedPanels['resurrection'] ? "folded" : ""}">
+    <h2 class="ref-toggle" onclick="togglePanelFold('resurrection')">🕊️ Resurrection Arrangements ${foldIcon('resurrection')}</h2>
     <textarea rows="${estimateTextRows(s.resurrection)}" placeholder="What your god/temple has arranged for you, and the price..." oninput="this.style.height='auto';this.style.height=this.scrollHeight+'px';" onchange="set('resurrection', this.value)">${esc(s.resurrection)}</textarea>
   </section>`;
 }
@@ -1207,8 +1298,8 @@ function resurrectionPanelHTML(){
 function notesPanelHTML(){
   const s = state;
   return `
-  <section class="panel wide">
-    <h2>📓 Notes</h2>
+  <section class="panel wide ${foldedPanels['notes'] ? "folded" : ""}">
+    <h2 class="ref-toggle" onclick="togglePanelFold('notes')">📓 Notes ${foldIcon('notes')}</h2>
     <textarea rows="${estimateTextRows(s.notes)}" placeholder="Anything else worth remembering..." oninput="this.style.height='auto';this.style.height=this.scrollHeight+'px';" onchange="set('notes', this.value)">${esc(s.notes)}</textarea>
   </section>`;
 }
@@ -1253,8 +1344,8 @@ function journeyPanelHTML(){
       <button type="button" class="secondary row-del no-print" onclick="removeRow('journey', ${i})">🗑 Remove</button>
     </div>`; }).join("");
   return `
-  <section class="panel wide journey-panel">
-    <h2>📖 Journey</h2>
+  <section class="panel wide journey-panel ${foldedPanels['journey'] ? "folded" : ""}">
+    <h2 class="ref-toggle" onclick="togglePanelFold('journey')">📖 Journey ${foldIcon('journey')}</h2>
     <p class="modal-hint">Every paragraph you've reached, newest first. Tap a node to see its note; the top entry is your current page.</p>
     ${journeyPathHTML(visible)}
     <hr class="divider">
@@ -1268,6 +1359,36 @@ function journeyPanelHTML(){
       <button type="button" class="secondary" onclick="addRow('journey', () => blankJourneyEntry(currentPageEntry() ? currentPageEntry().book : undefined))">+ Add entry</button>
       ${total > 3 ? `<button type="button" class="secondary" onclick="toggleJourneyExpanded()">${journeyExpanded ? "▲ Show last 3" : `▼ Show all (${total})`}</button>` : ""}
     </div>
+  </section>`;
+}
+
+function ticksPanelHTML(){
+  const s = state;
+  const rows = s.ticks.map((t, i) => `
+    <tr class="${t.checked?"tick-checked":""}">
+      <td class="col-check"><input type="checkbox" ${t.checked?"checked":""} onchange="toggleTick(${i})" aria-label="Checked"></td>
+      <td><select onchange="set('ticks.${i}.book', this.value)">${FL_BOOKS.map(b=>`<option value="${esc(b)}" ${t.book===b?"selected":""}>${esc(b)}</option>`).join("")}</select></td>
+      <td><input type="text" inputmode="numeric" value="${esc(t.paragraph)}" placeholder="#" style="width:70px" onchange="set('ticks.${i}.paragraph', this.value)"></td>
+      <td class="col-del no-print"><button type="button" class="icon-btn secondary" onclick="removeRow('ticks', ${i})" aria-label="Remove tick">🗑</button></td>
+    </tr>`).join("");
+  const cards = s.ticks.map((t, i) => `
+    <div class="entry-card ${t.checked?"tick-checked":""}">
+      <label class="tick-check-label"><input type="checkbox" ${t.checked?"checked":""} onchange="toggleTick(${i})"> Checked</label>
+      <div class="field"><label>Book</label><select onchange="set('ticks.${i}.book', this.value)">${FL_BOOKS.map(b=>`<option value="${esc(b)}" ${t.book===b?"selected":""}>${esc(b)}</option>`).join("")}</select></div>
+      <div class="field"><label>Paragraph</label><input type="text" inputmode="numeric" value="${esc(t.paragraph)}" onchange="set('ticks.${i}.paragraph', this.value)"></div>
+      <button type="button" class="secondary row-del no-print" onclick="removeRow('ticks', ${i})">🗑 Remove</button>
+    </div>`).join("");
+  return `
+  <section class="panel wide ${foldedPanels['ticks'] ? "folded" : ""}">
+    <h2 class="ref-toggle" onclick="togglePanelFold('ticks')">☑️ Tick-offs ${foldIcon('ticks')}</h2>
+    <p class="modal-hint">A closed checklist for paragraphs your book tells you to tick off — separate from the Journey log above, and doesn't need a note.</p>
+    <table class="entry-table">
+      <thead><tr><th></th><th>Book</th><th>Paragraph</th><th class="no-print"></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <div class="entry-cards">${cards}</div>
+    ${!s.ticks.length ? `<p class="empty-hint">Nothing to tick off yet.</p>` : ""}
+    <button type="button" class="secondary no-print" onclick="addRow('ticks', blankTick)">+ Add tick</button>
   </section>`;
 }
 
@@ -1285,8 +1406,8 @@ function shipsPanelHTML(){
       <button type="button" class="secondary row-del no-print" onclick="removeRow('ships', ${i})">🗑 Remove</button>
     </div>`).join("");
   return `
-  <section class="panel wide">
-    <h2>⛵ Ship's Manifest</h2>
+  <section class="panel wide ${foldedPanels['ships'] ? "folded" : ""}">
+    <h2 class="ref-toggle" onclick="togglePanelFold('ships')">⛵ Ship's Manifest ${foldIcon('ships')}</h2>
     <table class="entry-table">
       <thead><tr>${cols.map(([,label])=>`<th>${label}</th>`).join("")}<th class="no-print"></th></tr></thead>
       <tbody>${rows}</tbody>
@@ -1313,8 +1434,8 @@ function dicePanelHTML(){
     ? `<div class="dice-history">${diceHistory.map(h => `<span>${h.label?esc(h.label)+": ":""}${diceRollSummary(h)}</span>`).join("")}</div>`
     : "";
   return `
-  <section class="panel dice-panel">
-    <h2>🎲 Dice</h2>
+  <section class="panel dice-panel ${foldedPanels['dice'] ? "folded" : ""}">
+    <h2 class="ref-toggle" onclick="togglePanelFold('dice')">🎲 Dice ${foldIcon('dice')}</h2>
     <div class="roll-buttons no-print">
       <button type="button" onclick="rollDice(1)">Roll 1 die</button>
       <button type="button" onclick="rollDice(2)">Roll 2 dice</button>
@@ -1328,6 +1449,7 @@ function characterSheetHTML(){
   return `
   <div class="panels">
     ${journeyPanelHTML()}
+    ${ticksPanelHTML()}
     ${identityPanelHTML()}
     ${abilitiesPanelHTML()}
     ${combatPanelHTML()}
@@ -1370,6 +1492,12 @@ function render(){
         ${state ? `<button type="button" class="secondary" onclick="openExportModal()">Share / Export</button>` : ""}
         <button type="button" class="secondary" onclick="openImportModal()">Import</button>
         <button type="button" class="icon-btn secondary" title="Toggle theme" onclick="toggleTheme()">${effectiveTheme()==="dark" ? "☀️" : "🌙"}</button>
+        ${state ? `<button type="button" class="secondary" onclick="setAllFolded(true)">Hide All</button>
+        <button type="button" class="secondary" onclick="setAllFolded(false)">Show All</button>` : ""}
+        <select aria-label="Dice mode" title="3D dice can be slow to start on older phones — Simple mode skips the animation" onchange="setDiceMode(this.value)">
+          <option value="3d" ${diceMode==="3d"?"selected":""}>🎲 3D dice</option>
+          <option value="simple" ${diceMode==="simple"?"selected":""}>🎲 Simple dice (faster)</option>
+        </select>
         <span id="saveStatus" class="save-status"></span>
       </div>` : "";
 
